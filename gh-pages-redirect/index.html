@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenDesk — Forwarding to Cloudflare Pages</title>
+    <!-- Replace https://opendesk.pages.dev with your actual Cloudflare Pages URL -->
+    <meta http-equiv="refresh" content="0; url=https://opendesk.pages.dev/" />
+    <link rel="canonical" href="https://opendesk.pages.dev/" />
+    <script>
+      (function () {
+        var targetOrigin = 'https://opendesk.pages.dev';
+        var search = window.location.search || '';
+        var hash = window.location.hash || '';
+        window.location.replace(targetOrigin + '/' + search + hash);
+      })();
+    </script>
+  </head>
+  <body style="font-family: system-ui, sans-serif; padding: 2rem; color: #0f172a;">
+    <p>
+      Redirecting to <a href="https://opendesk.pages.dev/">OpenDesk on Cloudflare Pages</a>...
+    </p>
+  </body>
+</html>
