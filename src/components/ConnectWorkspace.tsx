@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDeskId, normalizeDeskId } from '../lib/platform';
+import type { RelayModeSetting } from '../hooks/useOpenDesk';
 import type {
   MonitorInfo,
   PeerDirectoryEntry,
@@ -33,6 +34,8 @@ interface ConnectWorkspaceProps {
   fingerprint: string;
   wsStatus: 'connecting' | 'connected' | 'disconnected';
   wsMode: 'websocket' | 'free-cloud' | 'broadcast-local';
+  relayModeSetting: RelayModeSetting;
+  relayRoom: string;
   localMonitors: { info: MonitorInfo; stream: MediaStream }[];
   onlinePeers: PeerDirectoryEntry[];
   savedDesks: SavedDesk[];
@@ -47,6 +50,7 @@ interface ConnectWorkspaceProps {
   initialTargetDeskId?: string;
   onDismissAlerts: () => void;
   onUpdateAlias: (next: string) => void;
+  onUpdateRelayMode: (mode: RelayModeSetting) => void;
   onAddHostMonitor: () => Promise<boolean>;
   onRemoveHostMonitor: (id: string) => Promise<void>;
   onConnect: (deskId: string, passcode?: string) => Promise<void>;
@@ -66,6 +70,8 @@ export function ConnectWorkspace({
   fingerprint,
   wsStatus,
   wsMode,
+  relayModeSetting,
+  relayRoom,
   localMonitors,
   onlinePeers,
   savedDesks,
@@ -75,6 +81,7 @@ export function ConnectWorkspace({
   initialTargetDeskId = '',
   onDismissAlerts,
   onUpdateAlias,
+  onUpdateRelayMode,
   onAddHostMonitor,
   onRemoveHostMonitor,
   onConnect,
@@ -95,6 +102,7 @@ export function ConnectWorkspace({
   const [directBusy, setDirectBusy] = useState(false);
   const [directError, setDirectError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState(false);
+  const [copiedInvite, setCopiedInvite] = useState(false);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasDraft, setAliasDraft] = useState(alias);
   const [showQrModal, setShowQrModal] = useState(false);
@@ -104,7 +112,9 @@ export function ConnectWorkspace({
   const formattedOwnId = formatDeskId(deskId);
   const pairUrl =
     typeof window !== 'undefined' && deskId
-      ? `${window.location.origin}${window.location.pathname}?connect=${deskId}`
+      ? `${window.location.origin}${window.location.pathname}?connect=${deskId}&room=${encodeURIComponent(
+          relayRoom
+        )}&relay=${wsMode === 'free-cloud' ? 'free-cloud' : relayModeSetting}`
       : '';
 
   const copyOwnId = async () => {
@@ -113,6 +123,17 @@ export function ConnectWorkspace({
       await navigator.clipboard.writeText(deskId);
       setCopiedId(true);
       window.setTimeout(() => setCopiedId(false), 1600);
+    } catch {
+      // ignore
+    }
+  };
+
+  const copyPairLink = async () => {
+    if (!pairUrl) return;
+    try {
+      await navigator.clipboard.writeText(pairUrl);
+      setCopiedInvite(true);
+      window.setTimeout(() => setCopiedInvite(false), 1600);
     } catch {
       // ignore
     }
@@ -266,16 +287,25 @@ export function ConnectWorkspace({
                   <span>
                     {wsStatus === 'connected'
                       ? wsMode === 'free-cloud'
-                        ? 'Free Cloud Relay · Encrypted'
-                        : 'Relay Ready · Encrypted'
+                        ? 'Global Internet Relay · Encrypted'
+                        : 'Dedicated Relay · Encrypted'
                       : wsMode === 'broadcast-local'
                       ? 'Local Mode · Encrypted'
                       : 'Connecting'}
                   </span>
                 </div>
                 <div className="font-mono text-[11px] tabular-nums">
-                  {fingerprint ? fingerprint.slice(0, 11) : ''}
+                  {wsMode === 'free-cloud' ? `Room: ${relayRoom}` : fingerprint ? fingerprint.slice(0, 11) : ''}
                 </div>
+                {wsMode !== 'free-cloud' && (
+                  <button
+                    type="button"
+                    onClick={() => onUpdateRelayMode('free-cloud')}
+                    className="text-[11px] font-medium text-red-600 hover:text-red-700 underline"
+                  >
+                    Switch to Free Internet Relay
+                  </button>
+                )}
               </div>
             </div>
 
@@ -386,13 +416,32 @@ export function ConnectWorkspace({
               <span>Pair Mobile (QR)</span>
             </button>
 
+            <button
+              type="button"
+              onClick={copyPairLink}
+              disabled={!pairUrl}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0"
+            >
+              {copiedInvite ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Copied Internet Link</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy Internet Link</span>
+                </>
+              )}
+            </button>
+
             <a
-              href={`./?connect=${deskId}`}
+              href={`./?connect=${deskId}&room=${encodeURIComponent(relayRoom)}`}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0"
             >
-              <span>Open Companion Tab</span>
+              <span>Companion Tab</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
           </div>

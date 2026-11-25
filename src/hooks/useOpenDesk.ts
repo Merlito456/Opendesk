@@ -28,10 +28,12 @@ import type {
   PeerDirectoryEntry,
   PlatformOS,
   QualityPreset,
+  RelayFrameState,
   RemotePointerState,
   SavedDesk,
   SessionChatMessage,
   SessionPermissions,
+  TurnServerConfig,
   WebRTCStatsSnapshot,
 } from '../types';
 
@@ -45,12 +47,18 @@ const STORAGE_PERMISSIONS = 'opendesk_default_permissions_v1';
 const STORAGE_SIGNALING_URL = 'opendesk_signaling_url_v1';
 const STORAGE_RELAY_MODE = 'opendesk_relay_mode_v1';
 const STORAGE_RELAY_ROOM = 'opendesk_relay_room_v1';
+const STORAGE_TURN_CONFIG = 'opendesk_turn_config_v1';
 
 export type RelayModeSetting = 'auto' | 'free-cloud' | 'custom-ws';
 
-function getDefaultSignalingUrl(): string {
+function getConfiguredEnvSignalingUrl(): string {
   const envUrl = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_SIGNALING_URL;
-  if (envUrl && envUrl.trim()) return envUrl.trim();
+  return envUrl && envUrl.trim() ? envUrl.trim() : '';
+}
+
+function getDefaultSignalingUrl(): string {
+  const envUrl = getConfiguredEnvSignalingUrl();
+  if (envUrl) return envUrl;
   if (typeof window === 'undefined') return 'ws://localhost:3000/ws';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws`;
@@ -58,13 +66,26 @@ function getDefaultSignalingUrl(): string {
 
 const CHUNK_SIZE = 16384;
 
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-};
+const BASE_STUN_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.stunprotocol.org:3478' },
+];
+
+function buildRtcConfig(turn?: TurnServerConfig | null): RTCConfiguration {
+  const iceServers: RTCIceServer[] = [...BASE_STUN_SERVERS];
+  if (turn && turn.urls.trim()) {
+    const entry: RTCIceServer = { urls: turn.urls.trim() };
+    if (turn.username?.trim()) entry.username = turn.username.trim();
+    if (turn.credential?.trim()) entry.credential = turn.credential.trim();
+    iceServers.push(entry);
+  }
+  return {
+    iceServers,
+    iceCandidatePoolSize: 4,
+  };
+}
 
 interface LocalMonitorTrack {
   info: MonitorInfo;
@@ -97,7 +118,9 @@ type ControlPacket =
   | { kind: 'input:pointer'; x: number; y: number; event: 'move' | 'down' | 'up' | 'wheel'; button?: number; deltaY?: number; senderAlias: string }
   | { kind: 'input:key'; key: string; code: string; ctrl?: boolean; alt?: boolean; shift?: boolean; meta?: boolean }
   | { kind: 'file:meta'; id: string; name: string; size: number; mimeType: string; sha256: string; totalChunks: number }
-  | { kind: 'file:chunk'; id: string; index: number; dataB64: string };
+  | { kind: 'file:chunk'; id: string; index: number; dataB64: string }
+  | { kind: 'screen:frame'; monitorId: string; label: string; width: number; height: number; dataUrl: string; timestamp: number }
+  | { kind: 'relay:stream-mode'; enabled: boolean };
 
 const DEFAULT_PERMISSIONS: SessionPermissions = {
   viewScreen: true,
@@ -121,15 +144,40 @@ export function useOpenDesk() {
     return localStorage.getItem(STORAGE_SIGNALING_URL) || getDefaultSignalingUrl();
   });
   const [relayModeSetting, setRelayModeSetting] = useState<RelayModeSetting>(() => {
+    if (typeof window !== 'undefined') {
+      const qRelay = new URLSearchParams(window.location.search).get('relay');
+      if (qRelay === 'free-cloud' || qRelay === 'auto' || qRelay === 'custom-ws') {
+        localStorage.setItem(STORAGE_RELAY_MODE, qRelay);
+        return qRelay;
+      }
+    }
     const saved = localStorage.getItem(STORAGE_RELAY_MODE);
-    return saved === 'free-cloud' || saved === 'custom-ws' ? saved : 'auto';
+    if (saved === 'auto' || saved === 'free-cloud' || saved === 'custom-ws') return saved;
+    return getConfiguredEnvSignalingUrl() ? 'auto' : 'free-cloud';
   });
   const [relayRoom, setRelayRoom] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const qRoom = new URLSearchParams(window.location.search).get('room');
+      const cleanRoom = qRoom?.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+      if (cleanRoom) {
+        localStorage.setItem(STORAGE_RELAY_ROOM, cleanRoom);
+        return cleanRoom;
+      }
+    }
     return localStorage.getItem(STORAGE_RELAY_ROOM) || 'opendesk-public-v1';
+  });
+  const [turnConfig, setTurnConfigState] = useState<TurnServerConfig>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_TURN_CONFIG);
+      if (raw) return JSON.parse(raw) as TurnServerConfig;
+    } catch {
+      // ignore
+    }
+    return { urls: '', username: '', credential: '' };
   });
   const [activeBrokerUrl, setActiveBrokerUrl] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
-  const [wsMode, setWsMode] = useState<'websocket' | 'free-cloud' | 'broadcast-local'>('websocket');
+  const [wsMode, setWsMode] = useState<'websocket' | 'free-cloud' | 'broadcast-local'>('free-cloud');
   const [discoverable, setDiscoverableState] = useState<boolean>(() => {
     const val = localStorage.getItem(STORAGE_DISCOVERABLE);
     return val === null ? true : val === 'true';
@@ -170,11 +218,14 @@ export function useOpenDesk() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
-  // Multi-monitor streams
+  // Multi-monitor streams + E2E encrypted cloud video fallback
   const [localMonitors, setLocalMonitors] = useState<LocalMonitorTrack[]>([]);
   const [remoteMonitors, setRemoteMonitors] = useState<MonitorInfo[]>([]);
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const [remoteRelayFrames, setRemoteRelayFrames] = useState<Record<string, RelayFrameState>>({});
   const [activeMonitorId, setActiveMonitorId] = useState<string>('all');
+  const [manualCloudStream, setManualCloudStream] = useState<boolean>(false);
+  const [iceState, setIceState] = useState<RTCIceConnectionState>('new');
 
   // Streaming quality & live WebRTC stats
   const [qualityPreset, setQualityPresetState] = useState<QualityPreset>('low-latency');
@@ -187,6 +238,7 @@ export function useOpenDesk() {
     codec: null,
     candidateType: null,
     transportMode: 'e2e-relay',
+    iceState: 'new',
   });
 
   // Collaboration features
@@ -231,6 +283,14 @@ export function useOpenDesk() {
   const mqttClientRef = useRef<FreeCloudRelayClient | null>(null);
   const relayModeRef = useRef<RelayModeSetting>(relayModeSetting);
   const relayRoomRef = useRef<string>(relayRoom);
+  const turnConfigRef = useRef<TurnServerConfig>(turnConfig);
+  const manualCloudStreamRef = useRef<boolean>(manualCloudStream);
+  const activeMonitorIdRef = useRef<string>(activeMonitorId);
+  const relayFpsCounterRef = useRef<{ count: number; windowStart: number; fps: number }>({
+    count: 0,
+    windowStart: Date.now(),
+    fps: 0,
+  });
 
   activeSessionRef.current = activeSession;
   localMonitorsRef.current = localMonitors;
@@ -243,6 +303,9 @@ export function useOpenDesk() {
   signalingUrlRef.current = signalingUrl;
   relayModeRef.current = relayModeSetting;
   relayRoomRef.current = relayRoom;
+  turnConfigRef.current = turnConfig;
+  manualCloudStreamRef.current = manualCloudStream;
+  activeMonitorIdRef.current = activeMonitorId;
 
   const sendWs = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -357,6 +420,59 @@ export function useOpenDesk() {
         if (session.role === 'host') {
           await applySenderQuality(packet.preset);
         }
+        return;
+      }
+
+      if (packet.kind === 'relay:stream-mode') {
+        setManualCloudStream(packet.enabled);
+        return;
+      }
+
+      if (packet.kind === 'screen:frame') {
+        if (!session.permissions.viewScreen) return;
+        const counter = relayFpsCounterRef.current;
+        counter.count += 1;
+        const now = Date.now();
+        const elapsed = (now - counter.windowStart) / 1000;
+        if (elapsed >= 1) {
+          counter.fps = Math.round(counter.count / elapsed);
+          counter.count = 0;
+          counter.windowStart = now;
+        }
+        setRemoteRelayFrames((prev) => ({
+          ...prev,
+          [packet.monitorId]: {
+            monitorId: packet.monitorId,
+            label: packet.label,
+            dataUrl: packet.dataUrl,
+            width: packet.width,
+            height: packet.height,
+            timestamp: packet.timestamp,
+          },
+        }));
+        setRemoteMonitors((prev) => {
+          if (prev.some((m) => m.id === packet.monitorId)) return prev;
+          return [
+            ...prev,
+            {
+              id: packet.monitorId,
+              trackId: packet.monitorId,
+              label: packet.label,
+              width: packet.width,
+              height: packet.height,
+              primary: prev.length === 0,
+            },
+          ];
+        });
+        setRtcStats((prev) => ({
+          ...prev,
+          width: packet.width,
+          height: packet.height,
+          fps: counter.fps || prev.fps || 6,
+          codec: 'E2E-JPEG',
+          candidateType: prev.candidateType || 'wss-relay',
+          transportMode: 'cloud-frame-relay',
+        }));
         return;
       }
 
@@ -574,8 +690,11 @@ export function useOpenDesk() {
     prevStatsRef.current = null;
     remoteTrackCounterRef.current = 0;
     setRemoteStreams({});
+    setRemoteRelayFrames({});
     setRemoteMonitors([]);
     setActiveMonitorId('all');
+    setManualCloudStream(false);
+    setIceState('new');
     setRtcStats({
       rttMs: null,
       fps: null,
@@ -585,6 +704,7 @@ export function useOpenDesk() {
       codec: null,
       candidateType: null,
       transportMode: 'e2e-relay',
+      iceState: 'new',
     });
   }, []);
 
@@ -652,7 +772,7 @@ export function useOpenDesk() {
   const createPeerConnection = useCallback(
     (sessionId: string, role: 'host' | 'viewer') => {
       cleanupPeerConnection();
-      const pc = new RTCPeerConnection(RTC_CONFIG);
+      const pc = new RTCPeerConnection(buildRtcConfig(turnConfigRef.current));
       pcRef.current = pc;
 
       pc.onicecandidate = (evt) => {
@@ -666,11 +786,31 @@ export function useOpenDesk() {
         }
       };
 
+      pc.oniceconnectionstatechange = () => {
+        const nextIce = pc.iceConnectionState;
+        setIceState(nextIce);
+        setRtcStats((prev) => ({
+          ...prev,
+          iceState: nextIce,
+          transportMode:
+            nextIce === 'connected' || nextIce === 'completed'
+              ? 'webrtc-p2p'
+              : prev.transportMode === 'cloud-frame-relay'
+              ? 'cloud-frame-relay'
+              : 'e2e-relay',
+        }));
+      };
+
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === 'connected') {
           setRtcStats((prev) => ({
             ...prev,
-            transportMode: dcRef.current?.readyState === 'open' ? 'webrtc-p2p' : prev.transportMode,
+            transportMode:
+              dcRef.current?.readyState === 'open' ||
+              pc.iceConnectionState === 'connected' ||
+              pc.iceConnectionState === 'completed'
+                ? 'webrtc-p2p'
+                : prev.transportMode,
           }));
         }
       };
@@ -1421,16 +1561,24 @@ export function useOpenDesk() {
         }
         prevStatsRef.current = { bytes: totalBytes, ts: now };
 
-        setRtcStats({
+        setRtcStats((prev) => ({
           rttMs,
-          fps,
+          fps: fps ?? (prev.transportMode === 'cloud-frame-relay' ? prev.fps : null),
           bitrateKbps,
-          width,
-          height,
-          codec,
-          candidateType,
-          transportMode: dcRef.current?.readyState === 'open' ? 'webrtc-p2p' : 'e2e-relay',
-        });
+          width: width ?? (prev.transportMode === 'cloud-frame-relay' ? prev.width : null),
+          height: height ?? (prev.transportMode === 'cloud-frame-relay' ? prev.height : null),
+          codec: codec ?? (prev.transportMode === 'cloud-frame-relay' ? prev.codec : null),
+          candidateType: candidateType ?? prev.candidateType,
+          iceState: pc.iceConnectionState,
+          transportMode:
+            pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed'
+              ? 'webrtc-p2p'
+              : prev.transportMode === 'cloud-frame-relay'
+              ? 'cloud-frame-relay'
+              : dcRef.current?.readyState === 'open'
+              ? 'webrtc-p2p'
+              : 'e2e-relay',
+        }));
       } catch {
         // ignore transient getStats errors
       }
@@ -1438,6 +1586,115 @@ export function useOpenDesk() {
 
     return () => window.clearInterval(timer);
   }, [activeSession]);
+
+  // Automatic Free E2E Encrypted Cloud Video Relay fallback when WebRTC ICE fails across NAT/firewalls
+  useEffect(() => {
+    if (!activeSession || activeSession.role !== 'host' || localMonitors.length === 0) {
+      return;
+    }
+    const p2pHealthy = iceState === 'connected' || iceState === 'completed';
+    if (p2pHealthy && !manualCloudStream) {
+      return;
+    }
+
+    let cancelled = false;
+    let captureTimer: number | null = null;
+    let sending = false;
+    const videoEl = document.createElement('video');
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    const startDelay = manualCloudStream || iceState === 'failed' || iceState === 'disconnected' ? 150 : 5000;
+
+    const bootFallbackCapture = () => {
+      if (cancelled) return;
+      const runTick = async () => {
+        if (cancelled) return;
+        const currSession = activeSessionRef.current;
+        const monitors = localMonitorsRef.current;
+        const aesKey = aesKeyRef.current;
+        if (!currSession || monitors.length === 0 || !aesKey || sending || !ctx) {
+          captureTimer = window.setTimeout(runTick, 200);
+          return;
+        }
+
+        const pc = pcRef.current;
+        const nowHealthy =
+          pc && (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed');
+        if (nowHealthy && !manualCloudStreamRef.current) {
+          return;
+        }
+
+        const targetMonitor =
+          monitors.find((m) => m.info.id === activeMonitorIdRef.current) || monitors[0];
+
+        if (videoEl.srcObject !== targetMonitor.stream) {
+          videoEl.srcObject = targetMonitor.stream;
+          await videoEl.play().catch(() => {});
+        }
+
+        if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+          sending = true;
+          try {
+            const maxW =
+              qualityPreset === 'low-latency' ? 960 : qualityPreset === 'balanced' ? 800 : 640;
+            const scale = Math.min(1, maxW / videoEl.videoWidth);
+            const targetW = Math.max(320, Math.round(videoEl.videoWidth * scale));
+            const targetH = Math.max(180, Math.round(videoEl.videoHeight * scale));
+            if (canvas.width !== targetW || canvas.height !== targetH) {
+              canvas.width = targetW;
+              canvas.height = targetH;
+            }
+            ctx.drawImage(videoEl, 0, 0, targetW, targetH);
+
+            let jpegQuality = qualityPreset === 'data-saver' ? 0.42 : 0.56;
+            let dataUrl = canvas.toDataURL('image/jpeg', jpegQuality);
+            if (dataUrl.length > 75000) {
+              jpegQuality = 0.36;
+              dataUrl = canvas.toDataURL('image/jpeg', jpegQuality);
+            }
+
+            const sealed = await encryptPayload(aesKey, {
+              kind: 'screen:frame',
+              monitorId: targetMonitor.info.id,
+              label: targetMonitor.info.label,
+              width: targetW,
+              height: targetH,
+              dataUrl,
+              timestamp: Date.now(),
+            } satisfies ControlPacket);
+
+            sendWs({
+              type: 'relay:message',
+              sessionId: currSession.sessionId,
+              sealed,
+            });
+          } catch {
+            // ignore transient frame capture error
+          } finally {
+            sending = false;
+          }
+        }
+
+        const intervalMs =
+          qualityPreset === 'low-latency' ? 140 : qualityPreset === 'balanced' ? 190 : 280;
+        captureTimer = window.setTimeout(runTick, intervalMs);
+      };
+
+      runTick();
+    };
+
+    const delayTimer = window.setTimeout(bootFallbackCapture, startDelay);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(delayTimer);
+      if (captureTimer) window.clearTimeout(captureTimer);
+      videoEl.srcObject = null;
+    };
+  }, [activeSession, iceState, localMonitors, manualCloudStream, qualityPreset, sendWs]);
 
   // Host: Capture a display (supports adding multiple monitors!)
   const addHostMonitor = useCallback(async () => {
@@ -2106,6 +2363,25 @@ export function useOpenDesk() {
     setRelayRoom(clean);
   }, []);
 
+  const updateTurnConfig = useCallback((next: TurnServerConfig) => {
+    const clean: TurnServerConfig = {
+      urls: next.urls.trim(),
+      username: next.username?.trim() || '',
+      credential: next.credential?.trim() || '',
+    };
+    localStorage.setItem(STORAGE_TURN_CONFIG, JSON.stringify(clean));
+    setTurnConfigState(clean);
+  }, []);
+
+  const toggleCloudStreamRelay = useCallback(
+    async (enabled?: boolean) => {
+      const next = typeof enabled === 'boolean' ? enabled : !manualCloudStreamRef.current;
+      setManualCloudStream(next);
+      await sendEncryptedControl({ kind: 'relay:stream-mode', enabled: next });
+    },
+    [sendEncryptedControl]
+  );
+
   return {
     deskId,
     isSecondaryTab,
@@ -2117,6 +2393,7 @@ export function useOpenDesk() {
     defaultSignalingUrl: getDefaultSignalingUrl(),
     relayModeSetting,
     relayRoom,
+    turnConfig,
     activeBrokerUrl,
     wsStatus,
     wsMode,
@@ -2134,7 +2411,9 @@ export function useOpenDesk() {
     localMonitors,
     remoteMonitors,
     remoteStreams,
+    remoteRelayFrames,
     activeMonitorId,
+    manualCloudStream,
     qualityPreset,
     rtcStats,
     clipboardHistory,
@@ -2149,6 +2428,8 @@ export function useOpenDesk() {
     updateSignalingUrl,
     updateRelayMode,
     updateRelayRoom,
+    updateTurnConfig,
+    toggleCloudStreamRelay,
     updateDiscoverable,
     configureUnattendedAccess,
     updateDefaultPermissions,

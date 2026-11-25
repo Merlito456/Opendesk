@@ -3,7 +3,7 @@ import { Check, Cloud, Copy, ExternalLink, RotateCcw } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatDeskId } from '../lib/platform';
 import type { RelayModeSetting } from '../hooks/useOpenDesk';
-import type { PlatformOS } from '../types';
+import type { PlatformOS, TurnServerConfig } from '../types';
 import { PlatformIcon } from './PlatformIcon';
 
 interface PlatformsViewProps {
@@ -12,12 +12,14 @@ interface PlatformsViewProps {
   signalingUrl: string;
   relayModeSetting: RelayModeSetting;
   relayRoom: string;
+  turnConfig: TurnServerConfig;
   activeBrokerUrl: string | null;
   wsStatus: 'connecting' | 'connected' | 'disconnected';
   wsMode: 'websocket' | 'free-cloud' | 'broadcast-local';
   onUpdateSignalingUrl: (next: string) => void;
   onUpdateRelayMode: (mode: RelayModeSetting) => void;
   onUpdateRelayRoom: (room: string) => void;
+  onUpdateTurnConfig: (next: TurnServerConfig) => void;
 }
 
 const PLATFORM_MATRIX: {
@@ -70,21 +72,29 @@ export function PlatformsView({
   signalingUrl,
   relayModeSetting,
   relayRoom,
+  turnConfig,
   activeBrokerUrl,
   wsStatus,
   wsMode,
   onUpdateSignalingUrl,
   onUpdateRelayMode,
   onUpdateRelayRoom,
+  onUpdateTurnConfig,
 }: PlatformsViewProps) {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [signalDraft, setSignalDraft] = useState(signalingUrl);
   const [roomDraft, setRoomDraft] = useState(relayRoom);
+  const [turnUrlDraft, setTurnUrlDraft] = useState(turnConfig.urls);
+  const [turnUserDraft, setTurnUserDraft] = useState(turnConfig.username || '');
+  const [turnPassDraft, setTurnPassDraft] = useState(turnConfig.credential || '');
+  const [turnSavedNotice, setTurnSavedNotice] = useState(false);
   const [cfPagesUrl, setCfPagesUrl] = useState('https://opendesk.pages.dev');
 
   const pairUrl =
     typeof window !== 'undefined' && deskId
-      ? `${window.location.origin}${window.location.pathname}?connect=${deskId}`
+      ? `${window.location.origin}${window.location.pathname}?connect=${deskId}&room=${encodeURIComponent(
+          relayRoom
+        )}&relay=${wsMode === 'free-cloud' ? 'free-cloud' : relayModeSetting}`
       : '';
 
   const copyText = async (key: string, text: string) => {
@@ -316,6 +326,72 @@ export function PlatformsView({
               </div>
             </form>
           </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              onUpdateTurnConfig({
+                urls: turnUrlDraft,
+                username: turnUserDraft,
+                credential: turnPassDraft,
+              });
+              setTurnSavedNotice(true);
+              window.setTimeout(() => setTurnSavedNotice(false), 1800);
+            }}
+            className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  Cross-Network NAT Traversal (STUN + Automatic E2E Cloud Stream + Optional TURN)
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  If strict cellular/corporate NAT blocks direct WebRTC UDP, OpenDesk automatically
+                  falls back to AES-256-GCM encrypted frame streaming over the free WSS relay—or
+                  add free Metered (20 GB/mo) / Cloudflare TURN credentials below for full 60fps P2P
+                  relay.
+                </p>
+              </div>
+              {turnSavedNotice && (
+                <span className="text-xs font-medium text-emerald-600">Saved TURN config</span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+              <input
+                type="text"
+                value={turnUrlDraft}
+                onChange={(e) => setTurnUrlDraft(e.target.value)}
+                placeholder="turn:global.relay.metered.ca:443?transport=tcp"
+                aria-label="TURN Server URL"
+                className="sm:col-span-2 px-3 py-2 font-mono text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-red-600"
+              />
+              <input
+                type="text"
+                value={turnUserDraft}
+                onChange={(e) => setTurnUserDraft(e.target.value)}
+                placeholder="TURN Username (optional)"
+                aria-label="TURN Username"
+                className="px-3 py-2 font-mono text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-red-600"
+              />
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={turnPassDraft}
+                  onChange={(e) => setTurnPassDraft(e.target.value)}
+                  placeholder="Credential"
+                  aria-label="TURN Credential"
+                  className="flex-1 min-w-0 px-3 py-2 font-mono text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-red-600"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-2 text-xs font-semibold text-white bg-slate-900 dark:bg-slate-100 dark:text-slate-900 rounded-lg hover:bg-slate-800 dark:hover:bg-slate-200 transition-colors whitespace-nowrap shrink-0"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </form>
         </div>
 
         {/* Deployment Steps & Redirect Generator */}

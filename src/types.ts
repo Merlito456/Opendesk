@@ -92,7 +92,23 @@ export interface WebRTCStatsSnapshot {
   height: number | null;
   codec: string | null;
   candidateType: string | null;
-  transportMode: 'webrtc-p2p' | 'e2e-relay';
+  transportMode: 'webrtc-p2p' | 'e2e-relay' | 'cloud-frame-relay';
+  iceState?: RTCIceConnectionState;
+}
+
+export interface RelayFrameState {
+  monitorId: string;
+  label: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+  timestamp: number;
+}
+
+export interface TurnServerConfig {
+  urls: string;
+  username?: string;
+  credential?: string;
 }
 
 export interface IncomingSessionRequest {

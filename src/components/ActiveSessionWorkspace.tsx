@@ -38,6 +38,7 @@ import type {
   FileTransferItem,
   MonitorInfo,
   QualityPreset,
+  RelayFrameState,
   RemotePointerState,
   SessionChatMessage,
   WebRTCStatsSnapshot,
@@ -56,7 +57,9 @@ interface ActiveSessionWorkspaceProps {
   localMonitors: LocalMonitorEntry[];
   remoteMonitors: MonitorInfo[];
   remoteStreams: Record<string, MediaStream>;
+  remoteRelayFrames: Record<string, RelayFrameState>;
   activeMonitorId: string;
+  manualCloudStream: boolean;
   qualityPreset: QualityPreset;
   rtcStats: WebRTCStatsSnapshot;
   clipboardHistory: ClipboardItem[];
@@ -69,6 +72,7 @@ interface ActiveSessionWorkspaceProps {
   onRemoveHostMonitor: (id: string) => Promise<void>;
   onSelectMonitor: (id: string) => void;
   onSetQualityPreset: (preset: QualityPreset) => Promise<void>;
+  onToggleCloudStream: (enabled?: boolean) => Promise<void>;
   onSendPointer: (
     x: number,
     y: number,
@@ -92,6 +96,8 @@ interface ActiveSessionWorkspaceProps {
 
 function VideoStreamPlayer({
   stream,
+  relayFrame,
+  preferRelayFrame,
   muted,
   fitMode,
   label,
@@ -101,7 +107,9 @@ function VideoStreamPlayer({
   onPointer,
   onKey,
 }: {
-  stream: MediaStream;
+  stream?: MediaStream | null;
+  relayFrame?: RelayFrameState;
+  preferRelayFrame?: boolean;
   muted: boolean;
   fitMode: 'contain' | 'cover';
   label: string;
@@ -127,18 +135,33 @@ function VideoStreamPlayer({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const lastMoveRef = useRef<number>(0);
+  const [hasVideoFrames, setHasVideoFrames] = useState(false);
 
   useEffect(() => {
     const el = videoRef.current;
-    if (!el) return;
+    if (!el || !stream) {
+      setHasVideoFrames(false);
+      return;
+    }
     if (el.srcObject !== stream) {
       el.srcObject = stream;
     }
+    const onFrames = () => {
+      if (el.videoWidth > 0) setHasVideoFrames(true);
+    };
+    el.addEventListener('loadeddata', onFrames);
+    el.addEventListener('resize', onFrames);
     el.play().catch(() => {
       el.muted = true;
       el.play().catch(() => {});
     });
+    return () => {
+      el.removeEventListener('loadeddata', onFrames);
+      el.removeEventListener('resize', onFrames);
+    };
   }, [stream]);
+
+  const showRelayImage = Boolean(relayFrame && (preferRelayFrame || !stream || !hasVideoFrames));
 
   const computeNormCoords = (clientX: number, clientY: number) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -230,13 +253,22 @@ function VideoStreamPlayer({
         interactive ? 'cursor-crosshair' : ''
       }`}
     >
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted={muted}
-        className={`w-full h-full ${fitMode === 'contain' ? 'object-contain' : 'object-cover'}`}
-      />
+      {showRelayImage && relayFrame ? (
+        <img
+          src={relayFrame.dataUrl}
+          alt={label}
+          draggable={false}
+          className={`w-full h-full ${fitMode === 'contain' ? 'object-contain' : 'object-cover'}`}
+        />
+      ) : (
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted={muted}
+          className={`w-full h-full ${fitMode === 'contain' ? 'object-contain' : 'object-cover'}`}
+        />
+      )}
 
       {/* Display label overlay */}
       <div className="pointer-events-none absolute top-3 left-3 flex items-center gap-2 px-2.5 py-1 rounded-md bg-slate-950/75 border border-white/10 text-xs text-slate-200">
@@ -248,6 +280,14 @@ function VideoStreamPlayer({
               ·
             </span>
             <span className="font-mono text-[11px] text-slate-400 tabular-nums">{resolution}</span>
+          </>
+        )}
+        {showRelayImage && (
+          <>
+            <span aria-hidden="true" className="text-slate-500">
+              ·
+            </span>
+            <span className="text-[11px] text-emerald-400 font-medium">E2E Cloud Relay</span>
           </>
         )}
       </div>
@@ -284,7 +324,9 @@ export function ActiveSessionWorkspace({
   localMonitors,
   remoteMonitors,
   remoteStreams,
+  remoteRelayFrames,
   activeMonitorId,
+  manualCloudStream,
   qualityPreset,
   rtcStats,
   clipboardHistory,
@@ -297,6 +339,7 @@ export function ActiveSessionWorkspace({
   onRemoveHostMonitor,
   onSelectMonitor,
   onSetQualityPreset,
+  onToggleCloudStream,
   onSendPointer,
   onSendKey,
   onSyncClipboard,
@@ -344,27 +387,38 @@ export function ActiveSessionWorkspace({
     }
   };
 
-  // Build list of display feeds to render
+  // Build list of display feeds to render (native WebRTC streams + E2E cloud frame fallback)
   const displayFeeds = useMemo(() => {
     if (session.role === 'host') {
       return localMonitors.map((m) => ({
         id: m.info.id,
         label: m.info.label,
         resolution: `${m.info.width}×${m.info.height}`,
-        stream: m.stream,
+        stream: m.stream as MediaStream | undefined,
+        relayFrame: undefined as RelayFrameState | undefined,
       }));
     }
 
-    const entries: { id: string; label: string; resolution: string; stream: MediaStream }[] = [];
+    const entries: {
+      id: string;
+      label: string;
+      resolution: string;
+      stream?: MediaStream;
+      relayFrame?: RelayFrameState;
+    }[] = [];
     for (const mon of remoteMonitors) {
       const stream =
         (mon.streamId ? remoteStreams[mon.streamId] : undefined) || remoteStreams[mon.trackId];
-      if (stream && !entries.some((e) => e.stream === stream)) {
+      const relayFrame = remoteRelayFrames[mon.id] || Object.values(remoteRelayFrames)[0];
+      if ((stream && !entries.some((e) => e.stream === stream)) || relayFrame) {
         entries.push({
           id: mon.id,
           label: mon.label,
-          resolution: `${mon.width}×${mon.height}`,
+          resolution: relayFrame
+            ? `${relayFrame.width}×${relayFrame.height}`
+            : `${mon.width}×${mon.height}`,
           stream,
+          relayFrame,
         });
       }
     }
@@ -377,11 +431,23 @@ export function ActiveSessionWorkspace({
           label: `Display ${entries.length + 1}`,
           resolution: '',
           stream,
+          relayFrame: Object.values(remoteRelayFrames)[0],
+        });
+      }
+    }
+    // Include relay-only frames if no remote WebRTC track arrived
+    for (const [key, frame] of Object.entries(remoteRelayFrames)) {
+      if (!entries.some((e) => e.id === key || e.relayFrame?.monitorId === frame.monitorId)) {
+        entries.push({
+          id: key,
+          label: frame.label || `Display ${entries.length + 1}`,
+          resolution: `${frame.width}×${frame.height}`,
+          relayFrame: frame,
         });
       }
     }
     return entries;
-  }, [localMonitors, remoteMonitors, remoteStreams, session.role]);
+  }, [localMonitors, remoteMonitors, remoteRelayFrames, remoteStreams, session.role]);
 
   const visibleFeeds = useMemo(() => {
     if (displayFeeds.length <= 1 || activeMonitorId === 'all') return displayFeeds;
@@ -590,6 +656,21 @@ export function ActiveSessionWorkspace({
 
         {/* Right: Controls, Drawers, Disconnect */}
         <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => onToggleCloudStream()}
+            title="Force AES-256-GCM Cloud Video Relay across strict NATs/firewalls"
+            className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+              manualCloudStream || rtcStats.transportMode === 'cloud-frame-relay'
+                ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400'
+                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
+            }`}
+          >
+            {manualCloudStream || rtcStats.transportMode === 'cloud-frame-relay'
+              ? 'Cloud Stream On'
+              : 'Cloud Stream'}
+          </button>
+
           {session.role === 'viewer' && (
             <>
               <button
@@ -705,6 +786,10 @@ export function ActiveSessionWorkspace({
                 <div key={feed.id} className="relative h-full min-h-0 flex flex-col">
                   <VideoStreamPlayer
                     stream={feed.stream}
+                    relayFrame={feed.relayFrame}
+                    preferRelayFrame={
+                      manualCloudStream || rtcStats.transportMode === 'cloud-frame-relay'
+                    }
                     muted={session.role === 'host' ? true : muted}
                     fitMode={fitMode}
                     label={feed.label}
@@ -1091,7 +1176,13 @@ export function ActiveSessionWorkspace({
                     </span>
                     <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
                       <Lock className="w-3 h-3" />
-                      {rtcStats.transportMode === 'webrtc-p2p' ? 'WebRTC P2P' : 'E2E Relay'}
+                      {rtcStats.transportMode === 'webrtc-p2p'
+                        ? rtcStats.candidateType === 'relay'
+                          ? 'WebRTC TURN'
+                          : 'WebRTC P2P'
+                        : rtcStats.transportMode === 'cloud-frame-relay'
+                        ? 'E2E Cloud Stream'
+                        : 'E2E Relay'}
                     </span>
                   </div>
 

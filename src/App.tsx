@@ -274,7 +274,9 @@ export default function App() {
               localMonitors={desk.localMonitors}
               remoteMonitors={desk.remoteMonitors}
               remoteStreams={desk.remoteStreams}
+              remoteRelayFrames={desk.remoteRelayFrames}
               activeMonitorId={desk.activeMonitorId}
+              manualCloudStream={desk.manualCloudStream}
               qualityPreset={desk.qualityPreset}
               rtcStats={desk.rtcStats}
               clipboardHistory={desk.clipboardHistory}
@@ -287,6 +289,7 @@ export default function App() {
               onRemoveHostMonitor={desk.removeHostMonitor}
               onSelectMonitor={desk.selectMonitor}
               onSetQualityPreset={desk.setQualityPreset}
+              onToggleCloudStream={desk.toggleCloudStreamRelay}
               onSendPointer={desk.sendPointerEvent}
               onSendKey={desk.sendKeyEvent}
               onSyncClipboard={desk.syncClipboard}
@@ -304,6 +307,8 @@ export default function App() {
               fingerprint={desk.fingerprint}
               wsStatus={desk.wsStatus}
               wsMode={desk.wsMode}
+              relayModeSetting={desk.relayModeSetting}
+              relayRoom={desk.relayRoom}
               localMonitors={desk.localMonitors}
               onlinePeers={desk.onlinePeers}
               savedDesks={desk.savedDesks}
@@ -316,6 +321,7 @@ export default function App() {
                 desk.setStatusNotice(null);
               }}
               onUpdateAlias={desk.updateAlias}
+              onUpdateRelayMode={desk.updateRelayMode}
               onAddHostMonitor={desk.addHostMonitor}
               onRemoveHostMonitor={desk.removeHostMonitor}
               onConnect={desk.connectToDesk}
@@ -349,12 +355,14 @@ export default function App() {
               signalingUrl={desk.signalingUrl}
               relayModeSetting={desk.relayModeSetting}
               relayRoom={desk.relayRoom}
+              turnConfig={desk.turnConfig}
               activeBrokerUrl={desk.activeBrokerUrl}
               wsStatus={desk.wsStatus}
               wsMode={desk.wsMode}
               onUpdateSignalingUrl={desk.updateSignalingUrl}
               onUpdateRelayMode={desk.updateRelayMode}
               onUpdateRelayRoom={desk.updateRelayRoom}
+              onUpdateTurnConfig={desk.updateTurnConfig}
             />
           ) : (
             <SecurityView
