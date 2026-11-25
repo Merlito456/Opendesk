@@ -5,6 +5,7 @@ export type QualityPreset = 'low-latency' | 'balanced' | 'data-saver';
 export interface MonitorInfo {
   id: string;
   trackId: string;
+  streamId?: string;
   label: string;
   width: number;
   height: number;

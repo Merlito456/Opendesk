@@ -130,9 +130,14 @@ function VideoStreamPlayer({
 
   useEffect(() => {
     const el = videoRef.current;
-    if (el && el.srcObject !== stream) {
+    if (!el) return;
+    if (el.srcObject !== stream) {
       el.srcObject = stream;
     }
+    el.play().catch(() => {
+      el.muted = true;
+      el.play().catch(() => {});
+    });
   }, [stream]);
 
   const computeNormCoords = (clientX: number, clientY: number) => {
@@ -352,8 +357,9 @@ export function ActiveSessionWorkspace({
 
     const entries: { id: string; label: string; resolution: string; stream: MediaStream }[] = [];
     for (const mon of remoteMonitors) {
-      const stream = remoteStreams[mon.trackId];
-      if (stream) {
+      const stream =
+        (mon.streamId ? remoteStreams[mon.streamId] : undefined) || remoteStreams[mon.trackId];
+      if (stream && !entries.some((e) => e.stream === stream)) {
         entries.push({
           id: mon.id,
           label: mon.label,
@@ -363,11 +369,11 @@ export function ActiveSessionWorkspace({
       }
     }
     // Include any streams that didn't match a MonitorInfo yet
-    for (const [trackId, stream] of Object.entries(remoteStreams)) {
-      if (trackId.startsWith('audio_')) continue;
+    for (const [key, stream] of Object.entries(remoteStreams)) {
+      if (key.startsWith('audio_')) continue;
       if (!entries.some((e) => e.stream === stream)) {
         entries.push({
-          id: trackId,
+          id: key,
           label: `Display ${entries.length + 1}`,
           resolution: '',
           stream,

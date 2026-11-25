@@ -6,6 +6,7 @@ import {
   Copy,
   ExternalLink,
   KeyRound,
+  Link2,
   MonitorUp,
   Pencil,
   QrCode,
@@ -31,6 +32,7 @@ interface ConnectWorkspaceProps {
   canHostScreen: boolean;
   fingerprint: string;
   wsStatus: 'connecting' | 'connected' | 'disconnected';
+  wsMode: 'websocket' | 'broadcast-local';
   localMonitors: { info: MonitorInfo; stream: MediaStream }[];
   onlinePeers: PeerDirectoryEntry[];
   savedDesks: SavedDesk[];
@@ -50,6 +52,9 @@ interface ConnectWorkspaceProps {
   onConnect: (deskId: string, passcode?: string) => Promise<void>;
   onCancelOutgoing: () => void;
   onSaveDesk: (desk: SavedDesk) => void;
+  onCreateDirectOffer: (captureScreen?: boolean) => Promise<string | null>;
+  onAcceptDirectOffer: (code: string) => Promise<string>;
+  onCompleteDirectAnswer: (code: string) => Promise<void>;
 }
 
 export function ConnectWorkspace({
@@ -60,6 +65,7 @@ export function ConnectWorkspace({
   canHostScreen,
   fingerprint,
   wsStatus,
+  wsMode,
   localMonitors,
   onlinePeers,
   savedDesks,
@@ -74,10 +80,20 @@ export function ConnectWorkspace({
   onConnect,
   onCancelOutgoing,
   onSaveDesk,
+  onCreateDirectOffer,
+  onAcceptDirectOffer,
+  onCompleteDirectAnswer,
 }: ConnectWorkspaceProps) {
   const [targetInput, setTargetInput] = useState(() => formatDeskId(initialTargetDeskId));
   const [passcodeInput, setPasscodeInput] = useState('');
   const [showPasscodeField, setShowPasscodeField] = useState(false);
+  const [showDirectP2P, setShowDirectP2P] = useState(false);
+  const [directOfferOut, setDirectOfferOut] = useState('');
+  const [directOfferIn, setDirectOfferIn] = useState('');
+  const [directAnswerOut, setDirectAnswerOut] = useState('');
+  const [directAnswerIn, setDirectAnswerIn] = useState('');
+  const [directBusy, setDirectBusy] = useState(false);
+  const [directError, setDirectError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState(false);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasDraft, setAliasDraft] = useState(alias);
@@ -249,10 +265,10 @@ export function ConnectWorkspace({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   <span>
                     {wsStatus === 'connected'
-                      ? 'Ready · Encrypted'
-                      : wsStatus === 'connecting'
-                      ? 'Connecting'
-                      : 'Reconnecting'}
+                      ? 'Relay Ready · Encrypted'
+                      : wsMode === 'broadcast-local'
+                      ? 'Local Mode · Encrypted'
+                      : 'Connecting'}
                   </span>
                 </div>
                 <div className="font-mono text-[11px] tabular-nums">
@@ -431,7 +447,7 @@ export function ConnectWorkspace({
                 </button>
               </div>
 
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <button
                   type="button"
                   onClick={() => setShowPasscodeField((v) => !v)}
@@ -443,6 +459,15 @@ export function ConnectWorkspace({
                       ? 'Hide Unattended Passcode'
                       : 'Use Unattended Access Passcode'}
                   </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowDirectP2P((v) => !v)}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-red-600 hover:text-red-700 transition-colors"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>{showDirectP2P ? 'Hide Direct P2P Pair' : 'Direct P2P Pair (No Server)'}</span>
                 </button>
               </div>
 
@@ -457,6 +482,132 @@ export function ConnectWorkspace({
               )}
             </div>
           </form>
+
+          {showDirectP2P && (
+            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3 text-xs">
+              <div className="font-semibold text-slate-900 dark:text-slate-100">
+                Serverless Direct WebRTC Handshake
+              </div>
+              <p className="text-slate-500 dark:text-slate-400">
+                Connect across any two networks on static hosting (GitHub.io / Cloudflare Pages) by
+                exchanging an encrypted Offer & Answer token directly.
+              </p>
+
+              {directError && (
+                <div className="text-red-600 font-medium">{directError}</div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* Host Flow */}
+                <div className="space-y-2 p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                  <div className="font-medium text-slate-800 dark:text-slate-200">
+                    Host This Screen
+                  </div>
+                  <button
+                    type="button"
+                    disabled={directBusy}
+                    onClick={async () => {
+                      setDirectBusy(true);
+                      setDirectError(null);
+                      try {
+                        const code = await onCreateDirectOffer(true);
+                        if (code) setDirectOfferOut(code);
+                      } catch (err) {
+                        setDirectError(err instanceof Error ? err.message : 'Failed to create invite.');
+                      } finally {
+                        setDirectBusy(false);
+                      }
+                    }}
+                    className="w-full py-1.5 font-semibold text-white bg-slate-900 dark:bg-slate-100 dark:text-slate-900 rounded-md disabled:opacity-50"
+                  >
+                    {directBusy ? 'Gathering ICE...' : '1. Create Offer Code'}
+                  </button>
+                  {directOfferOut && (
+                    <div className="space-y-1.5">
+                      <textarea
+                        readOnly
+                        rows={2}
+                        value={directOfferOut}
+                        onClick={(e) => {
+                          e.currentTarget.select();
+                          navigator.clipboard?.writeText(directOfferOut).catch(() => {});
+                        }}
+                        className="w-full p-2 font-mono text-[10px] rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                      />
+                      <input
+                        type="text"
+                        value={directAnswerIn}
+                        onChange={(e) => setDirectAnswerIn(e.target.value)}
+                        placeholder="2. Paste Answer Code here..."
+                        className="w-full px-2 py-1.5 font-mono text-[11px] rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                      />
+                      <button
+                        type="button"
+                        disabled={!directAnswerIn.trim()}
+                        onClick={async () => {
+                          setDirectError(null);
+                          try {
+                            await onCompleteDirectAnswer(directAnswerIn);
+                          } catch (err) {
+                            setDirectError(err instanceof Error ? err.message : 'Invalid answer code.');
+                          }
+                        }}
+                        className="w-full py-1.5 font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-md disabled:opacity-40"
+                      >
+                        3. Complete Connection
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Viewer Flow */}
+                <div className="space-y-2 p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                  <div className="font-medium text-slate-800 dark:text-slate-200">
+                    Connect to Host
+                  </div>
+                  <input
+                    type="text"
+                    value={directOfferIn}
+                    onChange={(e) => setDirectOfferIn(e.target.value)}
+                    placeholder="Paste Host Offer Code (OD1:...)"
+                    className="w-full px-2 py-1.5 font-mono text-[11px] rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                  />
+                  <button
+                    type="button"
+                    disabled={!directOfferIn.trim() || directBusy}
+                    onClick={async () => {
+                      setDirectBusy(true);
+                      setDirectError(null);
+                      try {
+                        const ans = await onAcceptDirectOffer(directOfferIn);
+                        setDirectAnswerOut(ans);
+                      } catch (err) {
+                        setDirectError(err instanceof Error ? err.message : 'Invalid offer code.');
+                      } finally {
+                        setDirectBusy(false);
+                      }
+                    }}
+                    className="w-full py-1.5 font-semibold text-white bg-red-600 hover:bg-red-700 rounded-md disabled:opacity-40"
+                  >
+                    Generate Answer Code
+                  </button>
+                  {directAnswerOut && (
+                    <textarea
+                      readOnly
+                      rows={2}
+                      value={directAnswerOut}
+                      onClick={(e) => {
+                        e.currentTarget.select();
+                        navigator.clipboard?.writeText(directAnswerOut).catch(() => {});
+                      }}
+                      placeholder="Send this Answer Code back to Host"
+                      className="w-full p-2 font-mono text-[10px] rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="pt-4 border-t border-slate-200 dark:border-slate-800 grid grid-cols-3 gap-4 text-xs">
             <div>

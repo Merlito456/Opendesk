@@ -303,6 +303,7 @@ export default function App() {
               canHostScreen={desk.canHostScreen}
               fingerprint={desk.fingerprint}
               wsStatus={desk.wsStatus}
+              wsMode={desk.wsMode}
               localMonitors={desk.localMonitors}
               onlinePeers={desk.onlinePeers}
               savedDesks={desk.savedDesks}
@@ -320,6 +321,9 @@ export default function App() {
               onConnect={desk.connectToDesk}
               onCancelOutgoing={desk.cancelOutgoing}
               onSaveDesk={desk.upsertSavedDesk}
+              onCreateDirectOffer={desk.createDirectOfferCode}
+              onAcceptDirectOffer={desk.acceptDirectOfferCode}
+              onCompleteDirectAnswer={desk.completeDirectAnswerCode}
             />
           ) : activeTab === 'address-book' ? (
             <AddressBookView

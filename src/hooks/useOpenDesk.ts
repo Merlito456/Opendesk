@@ -55,6 +55,7 @@ const CHUNK_SIZE = 16384;
 
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
+    { urls: 'stun:stun.cloudflare.com:3478' },
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
   ],
@@ -212,6 +213,8 @@ export function useOpenDesk() {
   const localSignalBcRef = useRef<BroadcastChannel | null>(null);
   const localPeersMapRef = useRef<Map<string, PeerDirectoryEntry>>(new Map());
   const signalingUrlRef = useRef<string>(signalingUrl);
+  const pendingRtcSignalsRef = useRef<Map<string, Record<string, unknown>[]>>(new Map());
+  const directOfferPcRef = useRef<RTCPeerConnection | null>(null);
 
   activeSessionRef.current = activeSession;
   localMonitorsRef.current = localMonitors;
@@ -676,21 +679,23 @@ export function useOpenDesk() {
           if (track.kind !== 'video' && track.kind !== 'audio') return;
 
           const stream = evt.streams[0] || new MediaStream([track]);
+          const streamKey = stream.id || track.id;
           if (track.kind === 'video') {
             setRemoteStreams((prev) => ({
               ...prev,
+              [streamKey]: stream,
               [track.id]: stream,
             }));
 
-            // Ensure a fallback MonitorInfo entry exists immediately even before metadata arrives
             setRemoteMonitors((prev) => {
-              if (prev.some((m) => m.trackId === track.id)) return prev;
+              if (prev.some((m) => m.streamId === stream.id || m.trackId === track.id)) return prev;
               const idx = remoteTrackCounterRef.current + 1;
               remoteTrackCounterRef.current = idx;
               const settings = track.getSettings();
               const info: MonitorInfo = {
-                id: track.id,
+                id: streamKey,
                 trackId: track.id,
+                streamId: stream.id,
                 label: `Display ${idx}`,
                 width: settings.width || 1920,
                 height: settings.height || 1080,
@@ -702,13 +707,15 @@ export function useOpenDesk() {
             track.onended = () => {
               setRemoteStreams((prev) => {
                 const copy = { ...prev };
+                delete copy[streamKey];
                 delete copy[track.id];
                 return copy;
               });
-              setRemoteMonitors((prev) => prev.filter((m) => m.trackId !== track.id));
+              setRemoteMonitors((prev) =>
+                prev.filter((m) => m.streamId !== stream.id && m.trackId !== track.id)
+              );
             };
           } else if (track.kind === 'audio') {
-            // Attach audio to the first available stream or separate audio bucket
             setRemoteStreams((prev) => ({
               ...prev,
               [`audio_${track.id}`]: stream,
@@ -760,6 +767,7 @@ export function useOpenDesk() {
           const info: MonitorInfo = {
             id: monId,
             trackId: vTrack.id,
+            streamId: stream.id,
             label: vTrack.label || 'Display 1',
             width: settings?.width || 1920,
             height: settings?.height || 1080,
@@ -1008,6 +1016,15 @@ export function useOpenDesk() {
           });
 
           createPeerConnection(session.sessionId, 'viewer');
+
+          // Drain any WebRTC offers/ICE candidates that arrived while deriving ECDH session keys
+          const queued = pendingRtcSignalsRef.current.get(session.sessionId);
+          if (queued && queued.length > 0) {
+            pendingRtcSignalsRef.current.delete(session.sessionId);
+            for (const qMsg of queued) {
+              await handleInboundSignal(qMsg);
+            }
+          }
           return;
         }
 
@@ -1027,9 +1044,18 @@ export function useOpenDesk() {
         }
 
         if (type === 'rtc:signal') {
+          const msgSessionId = String(msg.sessionId || '');
           const pc = pcRef.current;
           const session = activeSessionRef.current;
-          if (!pc || !session || msg.sessionId !== session.sessionId) return;
+          if (!pc || !session || msgSessionId !== session.sessionId) {
+            // Queue signal until viewer finishes deriving ECDH keys and builds RTCPeerConnection
+            if (msgSessionId) {
+              const list = pendingRtcSignalsRef.current.get(msgSessionId) || [];
+              list.push(msg);
+              pendingRtcSignalsRef.current.set(msgSessionId, list);
+            }
+            return;
+          }
 
           const signalType = String(msg.signalType || '');
           if (signalType === 'offer' && msg.sdp) {
@@ -1356,6 +1382,7 @@ export function useOpenDesk() {
       const info: MonitorInfo = {
         id: monId,
         trackId: vTrack.id,
+        streamId: stream.id,
         label: vTrack.label ? `${vTrack.label.slice(0, 28)}` : `Display ${index}`,
         width: settings.width || 1920,
         height: settings.height || 1080,
@@ -1825,6 +1852,167 @@ export function useOpenDesk() {
     }
   }, []);
 
+  const waitForIceComplete = (pc: RTCPeerConnection, timeoutMs = 1800) =>
+    new Promise<void>((resolve) => {
+      if (pc.iceGatheringState === 'complete') {
+        resolve();
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        pc.removeEventListener('icegatheringstatechange', onState);
+        resolve();
+      }, timeoutMs);
+      const onState = () => {
+        if (pc.iceGatheringState === 'complete') {
+          window.clearTimeout(timer);
+          pc.removeEventListener('icegatheringstatechange', onState);
+          resolve();
+        }
+      };
+      pc.addEventListener('icegatheringstatechange', onState);
+    });
+
+  const createDirectOfferCode = useCallback(
+    async (captureScreen = true): Promise<string | null> => {
+      const identity = identityRef.current;
+      if (!identity) return null;
+
+      if (captureScreen && canHostScreen && localMonitorsRef.current.length === 0) {
+        await addHostMonitor();
+      }
+
+      const sessionId = `direct_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const pc = createPeerConnection(sessionId, 'host');
+      directOfferPcRef.current = pc;
+
+      await applySenderQuality(qualityPreset);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceComplete(pc);
+
+      const bundle = {
+        v: 1,
+        sessionId,
+        deskId: deskIdRef.current,
+        alias: aliasRef.current,
+        platform,
+        publicKeyJwk: identity.publicKeyJwk,
+        fingerprint: identity.fingerprint,
+        monitors: localMonitorsRef.current.map((m) => m.info),
+        sdp: pc.localDescription,
+      };
+      const json = JSON.stringify(bundle);
+      return `OD1:${btoa(unescape(encodeURIComponent(json)))}`;
+    },
+    [addHostMonitor, applySenderQuality, canHostScreen, createPeerConnection, platform, qualityPreset]
+  );
+
+  const acceptDirectOfferCode = useCallback(
+    async (rawCode: string): Promise<string> => {
+      const identity = identityRef.current;
+      if (!identity) throw new Error('Identity keys not ready.');
+      const trimmed = rawCode.trim();
+      if (!trimmed.startsWith('OD1:')) {
+        throw new Error('Invalid invite code format. Expected OD1:...');
+      }
+      const payload = JSON.parse(decodeURIComponent(escape(atob(trimmed.slice(4))))) as {
+        sessionId: string;
+        deskId: string;
+        alias: string;
+        platform: PlatformOS;
+        publicKeyJwk: JsonWebKey;
+        fingerprint: string;
+        monitors?: MonitorInfo[];
+        sdp: RTCSessionDescriptionInit;
+      };
+
+      const sec = await deriveSessionSecurity(identity.privateKey, payload.publicKeyJwk);
+      aesKeyRef.current = sec.aesKey;
+
+      const session: ActiveSession = {
+        sessionId: payload.sessionId,
+        role: 'viewer',
+        remoteDeskId: payload.deskId,
+        remoteAlias: payload.alias,
+        remotePlatform: payload.platform,
+        remotePublicKeyJwk: payload.publicKeyJwk,
+        remoteFingerprint: payload.fingerprint,
+        sasCode: sec.sasCode,
+        sasPhrase: sec.sasPhrase,
+        permissions: DEFAULT_PERMISSIONS,
+        startedAt: Date.now(),
+      };
+      activeSessionRef.current = session;
+      setActiveSession(session);
+      setSessionError(null);
+      if (payload.monitors && payload.monitors.length > 0) {
+        setRemoteMonitors(payload.monitors);
+      }
+
+      const pc = createPeerConnection(payload.sessionId, 'viewer');
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceComplete(pc);
+
+      const answerBundle = {
+        v: 1,
+        sessionId: payload.sessionId,
+        deskId: deskIdRef.current,
+        alias: aliasRef.current,
+        platform,
+        publicKeyJwk: identity.publicKeyJwk,
+        fingerprint: identity.fingerprint,
+        sdp: pc.localDescription,
+      };
+      return `OD1:${btoa(unescape(encodeURIComponent(JSON.stringify(answerBundle))))}`;
+    },
+    [createPeerConnection, platform]
+  );
+
+  const completeDirectAnswerCode = useCallback(async (rawAnswerCode: string) => {
+    const identity = identityRef.current;
+    const pc = directOfferPcRef.current || pcRef.current;
+    if (!identity || !pc) throw new Error('No pending direct offer found.');
+
+    const trimmed = rawAnswerCode.trim();
+    if (!trimmed.startsWith('OD1:')) {
+      throw new Error('Invalid answer code format. Expected OD1:...');
+    }
+    const payload = JSON.parse(decodeURIComponent(escape(atob(trimmed.slice(4))))) as {
+      sessionId: string;
+      deskId: string;
+      alias: string;
+      platform: PlatformOS;
+      publicKeyJwk: JsonWebKey;
+      fingerprint: string;
+      sdp: RTCSessionDescriptionInit;
+    };
+
+    const sec = await deriveSessionSecurity(identity.privateKey, payload.publicKeyJwk);
+    aesKeyRef.current = sec.aesKey;
+
+    const session: ActiveSession = {
+      sessionId: payload.sessionId,
+      role: 'host',
+      remoteDeskId: payload.deskId,
+      remoteAlias: payload.alias,
+      remotePlatform: payload.platform,
+      remotePublicKeyJwk: payload.publicKeyJwk,
+      remoteFingerprint: payload.fingerprint,
+      sasCode: sec.sasCode,
+      sasPhrase: sec.sasPhrase,
+      permissions: DEFAULT_PERMISSIONS,
+      startedAt: Date.now(),
+    };
+    activeSessionRef.current = session;
+    setActiveSession(session);
+    setSessionError(null);
+
+    await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+    directOfferPcRef.current = null;
+  }, []);
+
   return {
     deskId,
     isSecondaryTab,
@@ -1883,5 +2071,8 @@ export function useOpenDesk() {
     syncClipboard,
     sendChatMessage,
     sendFiles,
+    createDirectOfferCode,
+    acceptDirectOfferCode,
+    completeDirectAnswerCode,
   };
 }
