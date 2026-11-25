@@ -11,6 +11,7 @@ import {
   sha256Buffer,
   type IdentityKeys,
 } from '../lib/crypto';
+import { FreeCloudRelayClient } from '../lib/mqttSignal';
 import {
   defaultDeviceAlias,
   detectPlatform,
@@ -42,6 +43,10 @@ const STORAGE_UNATTENDED_ENABLED = 'opendesk_unattended_enabled_v1';
 const STORAGE_UNATTENDED_HASH = 'opendesk_unattended_hash_v1';
 const STORAGE_PERMISSIONS = 'opendesk_default_permissions_v1';
 const STORAGE_SIGNALING_URL = 'opendesk_signaling_url_v1';
+const STORAGE_RELAY_MODE = 'opendesk_relay_mode_v1';
+const STORAGE_RELAY_ROOM = 'opendesk_relay_room_v1';
+
+export type RelayModeSetting = 'auto' | 'free-cloud' | 'custom-ws';
 
 function getDefaultSignalingUrl(): string {
   const envUrl = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_SIGNALING_URL;
@@ -115,8 +120,16 @@ export function useOpenDesk() {
   const [signalingUrl, setSignalingUrl] = useState<string>(() => {
     return localStorage.getItem(STORAGE_SIGNALING_URL) || getDefaultSignalingUrl();
   });
+  const [relayModeSetting, setRelayModeSetting] = useState<RelayModeSetting>(() => {
+    const saved = localStorage.getItem(STORAGE_RELAY_MODE);
+    return saved === 'free-cloud' || saved === 'custom-ws' ? saved : 'auto';
+  });
+  const [relayRoom, setRelayRoom] = useState<string>(() => {
+    return localStorage.getItem(STORAGE_RELAY_ROOM) || 'opendesk-public-v1';
+  });
+  const [activeBrokerUrl, setActiveBrokerUrl] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
-  const [wsMode, setWsMode] = useState<'websocket' | 'broadcast-local'>('websocket');
+  const [wsMode, setWsMode] = useState<'websocket' | 'free-cloud' | 'broadcast-local'>('websocket');
   const [discoverable, setDiscoverableState] = useState<boolean>(() => {
     const val = localStorage.getItem(STORAGE_DISCOVERABLE);
     return val === null ? true : val === 'true';
@@ -215,6 +228,9 @@ export function useOpenDesk() {
   const signalingUrlRef = useRef<string>(signalingUrl);
   const pendingRtcSignalsRef = useRef<Map<string, Record<string, unknown>[]>>(new Map());
   const directOfferPcRef = useRef<RTCPeerConnection | null>(null);
+  const mqttClientRef = useRef<FreeCloudRelayClient | null>(null);
+  const relayModeRef = useRef<RelayModeSetting>(relayModeSetting);
+  const relayRoomRef = useRef<string>(relayRoom);
 
   activeSessionRef.current = activeSession;
   localMonitorsRef.current = localMonitors;
@@ -225,6 +241,8 @@ export function useOpenDesk() {
   defaultPermissionsRef.current = defaultPermissions;
   autoClipboardRef.current = autoClipboardSync;
   signalingUrlRef.current = signalingUrl;
+  relayModeRef.current = relayModeSetting;
+  relayRoomRef.current = relayRoom;
 
   const sendWs = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -232,7 +250,10 @@ export function useOpenDesk() {
       ws.send(JSON.stringify(payload));
       return;
     }
-    // Static fallback when no WebSocket signaling server is reachable
+    if (mqttClientRef.current && mqttClientRef.current.sendOutbound(payload)) {
+      return;
+    }
+    // Static fallback when no WebSocket or Free Cloud relay is connected
     if (localSignalBcRef.current && deskIdRef.current) {
       localSignalBcRef.current.postMessage({
         ...payload,
@@ -1130,6 +1151,7 @@ export function useOpenDesk() {
           const msg = ev.data as Record<string, unknown>;
           if (!msg || msg._senderDeskId === deskIdRef.current) return;
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+          if (mqttClientRef.current) return;
 
           const type = String(msg.type || '');
           if (type === 'local:presence' || type === 'local:hello') {
@@ -1195,19 +1217,69 @@ export function useOpenDesk() {
         publishLocalPresence('local:hello');
       }
 
+      const startFreeCloudRelay = () => {
+        if (cancelled || mqttClientRef.current) return;
+        setWsStatus('connecting');
+        const client = new FreeCloudRelayClient(
+          {
+            deskId: deskIdRef.current,
+            alias: aliasRef.current,
+            platform,
+            publicKeyJwk: identityRef.current?.publicKeyJwk || {},
+            fingerprint: identityRef.current?.fingerprint || '',
+            discoverable: discoverableRef.current,
+            unattendedEnabled: unattendedEnabledRef.current,
+            unattendedHash: unattendedHashRef.current,
+            hosting: localMonitorsRef.current.length > 0,
+            monitorsCount: Math.max(1, localMonitorsRef.current.length),
+            room: relayRoomRef.current,
+          },
+          {
+            onConnect: (brokerUrl) => {
+              if (cancelled) return;
+              setActiveBrokerUrl(brokerUrl);
+              setWsStatus('connected');
+              setWsMode('free-cloud');
+            },
+            onDisconnect: () => {
+              if (cancelled) return;
+              setWsStatus('disconnected');
+              setWsMode('broadcast-local');
+            },
+            onSignalMessage: async (msg) => {
+              await handleInboundSignal(msg);
+            },
+          }
+        );
+        mqttClientRef.current = client;
+        client.connect();
+      };
+
       const connectSocket = () => {
         if (cancelled) return;
+        if (relayModeRef.current === 'free-cloud') {
+          startFreeCloudRelay();
+          return;
+        }
+
         setWsStatus('connecting');
+        let everOpened = false;
         try {
           ws = new WebSocket(signalingUrlRef.current);
         } catch {
-          setWsStatus('disconnected');
-          setWsMode('broadcast-local');
+          if (relayModeRef.current === 'auto') {
+            startFreeCloudRelay();
+          } else {
+            setWsStatus('disconnected');
+            setWsMode('broadcast-local');
+          }
           return;
         }
         wsRef.current = ws;
 
         ws.onopen = () => {
+          everOpened = true;
+          setActiveBrokerUrl(null);
           setWsStatus('connected');
           setWsMode('websocket');
           ws?.send(
@@ -1228,11 +1300,15 @@ export function useOpenDesk() {
         };
 
         ws.onclose = () => {
+          if (cancelled) return;
+          if (!everOpened && relayModeRef.current === 'auto') {
+            wsRef.current = null;
+            startFreeCloudRelay();
+            return;
+          }
           setWsStatus('disconnected');
           setWsMode('broadcast-local');
-          if (!cancelled) {
-            reconnectTimer = window.setTimeout(connectSocket, 4000);
-          }
+          reconnectTimer = window.setTimeout(connectSocket, 4000);
         };
 
         ws.onmessage = async (event) => {
@@ -1255,6 +1331,10 @@ export function useOpenDesk() {
       cancelled = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (ws) ws.close();
+      if (mqttClientRef.current) {
+        mqttClientRef.current.disconnect();
+        mqttClientRef.current = null;
+      }
       if (localSignalBcRef.current) {
         localSignalBcRef.current.postMessage({
           type: 'local:bye',
@@ -1272,6 +1352,8 @@ export function useOpenDesk() {
     createPeerConnection,
     handleControlPacket,
     platform,
+    relayModeSetting,
+    relayRoom,
     sendWs,
     signalingUrl,
   ]);
@@ -2013,6 +2095,17 @@ export function useOpenDesk() {
     directOfferPcRef.current = null;
   }, []);
 
+  const updateRelayMode = useCallback((mode: RelayModeSetting) => {
+    localStorage.setItem(STORAGE_RELAY_MODE, mode);
+    setRelayModeSetting(mode);
+  }, []);
+
+  const updateRelayRoom = useCallback((nextRoom: string) => {
+    const clean = nextRoom.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'opendesk-public-v1';
+    localStorage.setItem(STORAGE_RELAY_ROOM, clean);
+    setRelayRoom(clean);
+  }, []);
+
   return {
     deskId,
     isSecondaryTab,
@@ -2022,6 +2115,9 @@ export function useOpenDesk() {
     fingerprint,
     signalingUrl,
     defaultSignalingUrl: getDefaultSignalingUrl(),
+    relayModeSetting,
+    relayRoom,
+    activeBrokerUrl,
     wsStatus,
     wsMode,
     discoverable,
@@ -2051,6 +2147,8 @@ export function useOpenDesk() {
     setAutoClipboardSync,
     updateAlias,
     updateSignalingUrl,
+    updateRelayMode,
+    updateRelayRoom,
     updateDiscoverable,
     configureUnattendedAccess,
     updateDefaultPermissions,

@@ -32,7 +32,7 @@ interface ConnectWorkspaceProps {
   canHostScreen: boolean;
   fingerprint: string;
   wsStatus: 'connecting' | 'connected' | 'disconnected';
-  wsMode: 'websocket' | 'broadcast-local';
+  wsMode: 'websocket' | 'free-cloud' | 'broadcast-local';
   localMonitors: { info: MonitorInfo; stream: MediaStream }[];
   onlinePeers: PeerDirectoryEntry[];
   savedDesks: SavedDesk[];
@@ -265,7 +265,9 @@ export function ConnectWorkspace({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   <span>
                     {wsStatus === 'connected'
-                      ? 'Relay Ready · Encrypted'
+                      ? wsMode === 'free-cloud'
+                        ? 'Free Cloud Relay · Encrypted'
+                        : 'Relay Ready · Encrypted'
                       : wsMode === 'broadcast-local'
                       ? 'Local Mode · Encrypted'
                       : 'Connecting'}

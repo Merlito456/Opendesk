@@ -347,9 +347,14 @@ export default function App() {
               deskId={desk.deskId}
               currentPlatform={desk.platform}
               signalingUrl={desk.signalingUrl}
+              relayModeSetting={desk.relayModeSetting}
+              relayRoom={desk.relayRoom}
+              activeBrokerUrl={desk.activeBrokerUrl}
               wsStatus={desk.wsStatus}
               wsMode={desk.wsMode}
               onUpdateSignalingUrl={desk.updateSignalingUrl}
+              onUpdateRelayMode={desk.updateRelayMode}
+              onUpdateRelayRoom={desk.updateRelayRoom}
             />
           ) : (
             <SecurityView
